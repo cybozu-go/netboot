@@ -24,6 +24,8 @@ import (
 	"net"
 	"strconv"
 	"time"
+
+	"golang.org/x/net/ipv4"
 )
 
 const (
@@ -113,12 +115,16 @@ func (s *Server) Serve(l net.PacketConn) error {
 	if s.Handler == nil {
 		return errors.New("can't serve, Handler is nil")
 	}
-	if err := l.SetDeadline(time.Time{}); err != nil {
+	p := ipv4.NewPacketConn(l)
+	if err := p.SetDeadline(time.Time{}); err != nil {
+		return err
+	}
+	if err := p.SetControlMessage(ipv4.FlagDst, true); err != nil {
 		return err
 	}
 	buf := make([]byte, 512)
 	for {
-		n, addr, err := l.ReadFrom(buf)
+		n, cm, addr, err := p.ReadFrom(buf)
 		if err != nil {
 			return err
 		}
@@ -129,7 +135,7 @@ func (s *Server) Serve(l net.PacketConn) error {
 			continue
 		}
 
-		go s.transferAndLog(addr, req)
+		go s.transferAndLog(addr, req, cm)
 	}
 
 }
@@ -146,18 +152,25 @@ func (s *Server) transferLog(addr net.Addr, path string, err error) {
 	}
 }
 
-func (s *Server) transferAndLog(addr net.Addr, req *rrq) {
-	err := s.transfer(addr, req)
+func (s *Server) transferAndLog(addr net.Addr, req *rrq, cm *ipv4.ControlMessage) {
+	err := s.transfer(addr, req, cm)
 	if err != nil {
 		err = fmt.Errorf("%q: %s", addr, err)
 	}
 	s.transferLog(addr, req.Filename, err)
 }
 
-func (s *Server) transfer(addr net.Addr, req *rrq) error {
+func (s *Server) transfer(addr net.Addr, req *rrq, cm *ipv4.ControlMessage) error {
 	d := s.Dial
 	if d == nil {
-		d = net.Dial
+		if cm == nil || cm.Dst == nil {
+			d = net.Dial
+		} else {
+			dialer := net.Dialer{
+				LocalAddr: &net.UDPAddr{IP: cm.Dst},
+			}
+			d = dialer.Dial
+		}
 	}
 	conn, err := d("udp", addr.String())
 	if err != nil {
